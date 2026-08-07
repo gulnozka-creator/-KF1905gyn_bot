@@ -115,8 +115,11 @@ _MONTHS = {
     "июл":7,"авг":8,"сент":9,"сен":9,"окт":10,"ноя":11,"ноябр":11,"дек":12
 }
 
-def parse_schedule(text: str):
-    low = text.lower()
+def parse_one(text: str):
+    """Парсит ОДНУ запись: возвращает (date_str, start, end) или (None,None,None)."""
+    low = text.lower().strip()
+    if not low:
+        return None, None, None
 
     # Дата: 15.09 / 15/09 / 15 сентября
     date_str = None
@@ -143,12 +146,38 @@ def parse_schedule(text: str):
             start = f"{int(m.group(1)):02d}:{m.group(2) or '00'}"
             end   = f"{int(m.group(3)):02d}:{m.group(4) or '00'}"
         else:
-            m = re.search(r"\b(\d{1,2})\s*[-–]\s*(\d{1,2})\b", text)
+            # "09-15" но не "01.09" — ищем только часы
+            m = re.search(r"(?<![./\d])(\d{1,2})\s*[-–]\s*(\d{1,2})(?![./\d])", text)
             if m and int(m.group(1)) < 24 and int(m.group(2)) < 24:
                 start = f"{int(m.group(1)):02d}:00"
                 end   = f"{int(m.group(2)):02d}:00"
 
     return date_str, start, end
+
+def parse_schedule(text: str) -> list:
+    """Парсит одно или несколько расписаний из одного сообщения.
+    Возвращает список (date_str, start, end).
+    Поддерживает разделение запятой или переносом строки.
+    """
+    # Разбиваем по запятой или переносу строки
+    segments = re.split(r",|\n", text)
+    results = []
+    last_time = (None, None)  # запоминаем время для строк "дата - то же время"
+
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        date_str, start, end = parse_one(seg)
+        if start and end:
+            last_time = (start, end)
+        elif date_str and not start:
+            # Дата есть, время нет — берём последнее известное время
+            start, end = last_time
+        if date_str or start:
+            results.append((date_str, start, end))
+
+    return results
 
 # ─── Состояния ────────────────────────────────────────────────────────────────
 ASK_NAME, ASK_CABINET = range(2)
@@ -227,247 +256,57 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сначала представьтесь — напишите /start")
         return ConversationHandler.END
 
-    date_str, start, end = parse_schedule(text)
+    entries = parse_schedule(text)
 
-    if not date_str and not start:
+    if not entries:
         await update.message.reply_text(
             "Не смог распознать дату/время 🤔\n\n"
             "Пожалуйста, укажите конкретную дату:\n"
             "• <b>15.09 10:00–15:00</b>\n"
-            "• <b>15 сентября с 10 до 15</b>",
+            "• <b>15.09 09:00-15:00, 22.09 09:00-15:00</b> (несколько дат через запятую)",
             parse_mode="HTML"
         )
         return ConversationHandler.END
 
-    # Определяем кабинет автоматически
     cabinet = get_cabinet_by_name(doctor)
 
-    if cabinet:
-        save_schedule(doctor, date_str or "?", start or "?", end or "?", cabinet, text)
-        await update.message.reply_text(
-            f"✅ Записано!\n"
-            f"👤 {doctor}\n"
-            f"📅 {date_str}  ⏰ {start}–{end}\n"
-            f"🚪 {cabinet}"
-        )
-    else:
-        # Кабинет не определён — спрашиваем вручную
-        ctx.user_data["pending"] = (doctor, date_str, start, end, text)
+    if not cabinet:
+        # Кабинет не определён — сохраняем первую запись и спрашиваем кабинет
+        ctx.user_data["pending_multi"] = (doctor, entries, text)
         await update.message.reply_text("Какой кабинет?", reply_markup=_CAB_KB)
         return ASK_CABINET
 
+    # Сохраняем все записи
+    saved = []
+    for date_str, start, end in entries:
+        if date_str or start:
+            save_schedule(doctor, date_str or "?", start or "?", end or "?", cabinet, text)
+            saved.append(f"📅 {date_str}  ⏰ {start}–{end}")
+
+    if saved:
+        lines = [f"✅ Записано {len(saved)} дн. — 🚪 {cabinet}  👤 {doctor}"] + saved
+        await update.message.reply_text("\n".join(lines))
+    else:
+        await update.message.reply_text("Не удалось распознать даты, попробуйте ещё раз.")
+
     return ConversationHandler.END
 
 async def got_cabinet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw_cab = update.message.text.strip()
-    pending = ctx.user_data.pop("pending", None)
+    pending = ctx.user_data.pop("pending_multi", None)
     if not pending:
         await update.message.reply_text("Отправьте расписание заново.", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
-    doctor, date_str, start, end, raw = pending
+    doctor, entries, raw = pending
     m = re.search(r"\d+", raw_cab)
     cabinet = f"Каб.{m.group()}" if m else raw_cab
-    save_schedule(doctor, date_str or "?", start or "?", end or "?", cabinet, raw)
-    await update.message.reply_text(
-        f"✅ Записано!\n👤 {doctor}\n📅 {date_str}  ⏰ {start}–{end}\n🚪 {cabinet}",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
-
-# ─── Запуск ───────────────────────────────────────────────────────────────────
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", cmd_start), CommandHandler("myname", cmd_myname)],
-        states={
-            ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
-            ASK_CABINET: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_cabinet)],
-        },
-        fallbacks=[CommandHandler("start", cmd_start)],
-        allow_reentry=True,
-    )
-    app.add_handler(conv)
-    app.add_handler(CommandHandler("last", cmd_last))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Бот запущен ✅")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
-        return {"ok": False, "error": str(e)}
-
-def get_doctor(user_id: int) -> str | None:
-    if user_id in _doctors:
-        return _doctors[user_id]
-    res = _post("get_doctor", telegram_id=user_id)
-    fio = res.get("fio") if res.get("ok") else None
-    if fio:
-        _doctors[user_id] = fio
-    return fio
-
-def save_doctor(user_id: int, tg_name: str, fio: str):
-    _doctors[user_id] = fio   # всегда в памяти
-    _post("save_doctor", telegram_id=user_id, tg_name=tg_name, fio=fio)  # попытка в Sheets
-
-def save_schedule(doctor, date_str, start, end, cabinet, raw):
-    _post("save_schedule",
-          timestamp=datetime.now().strftime("%d.%m.%Y %H:%M"),
-          doctor=doctor, date=date_str, start=start,
-          end=end, cabinet=cabinet, raw=raw)
-
-def get_last(doctor: str):
-    res = _post("get_last", doctor=doctor)
-    return res.get("rows", []) if res.get("ok") else []
-
-# ─── Парсер расписания ────────────────────────────────────────────────────────
-_MONTHS = {
-    "янв":1,"фев":2,"мар":3,"апр":4,"май":5,"июн":6,
-    "июл":7,"авг":8,"сент":9,"сен":9,"окт":10,"ноя":11,"ноябр":11,"дек":12
-}
-
-def parse_schedule(text: str):
-    low = text.lower()
-    # Дата: 15.09 / 15/09 / 15 сентября
-    date_str = None
-    m = re.search(r"\b(\d{1,2})[./](\d{1,2})\b", text)
-    if m:
-        date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}"
-    else:
-        pat = r"\b(\d{1,2})\s+(" + "|".join(_MONTHS) + r")\w*"
-        m = re.search(pat, low)
-        if m:
-            mn = next((k for k in _MONTHS if m.group(2).startswith(k)), None)
-            if mn:
-                date_str = f"{int(m.group(1)):02d}.{_MONTHS[mn]:02d}"
-
-    # Время: 10:00-15:00 / с 10 до 15 / 10-15
-    start = end = None
-    m = re.search(r"(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})", text)
-    if m:
-        start = f"{int(m.group(1)):02d}:{m.group(2)}"
-        end   = f"{int(m.group(3)):02d}:{m.group(4)}"
-    else:
-        m = re.search(r"\bс\s+(\d{1,2})(?::(\d{2}))?\s+до\s+(\d{1,2})(?::(\d{2}))?", low)
-        if m:
-            start = f"{int(m.group(1)):02d}:{m.group(2) or '00'}"
-            end   = f"{int(m.group(3)):02d}:{m.group(4) or '00'}"
-        else:
-            m = re.search(r"\b(\d{1,2})\s*[-–]\s*(\d{1,2})\b", text)
-            if m and int(m.group(1)) < 24 and int(m.group(2)) < 24:
-                start = f"{int(m.group(1)):02d}:00"
-                end   = f"{int(m.group(2)):02d}:00"
-
-    # Кабинет
-    cabinet = None
-    m = re.search(r"(?:каб(?:инет)?\.?\s*|к\.?\s*)(\d+)", low)
-    if m:
-        cabinet = f"Каб.{m.group(1)}"
-
-    return date_str, start, end, cabinet
-
-# ─── Состояния ────────────────────────────────────────────────────────────────
-ASK_NAME, ASK_CABINET = range(2)
-_CAB_KB = ReplyKeyboardMarkup(
-    [["Каб.20", "Каб.21"], ["Каб.22", "Каб.23"]],
-    one_time_keyboard=True, resize_keyboard=True
-)
-
-# ─── Хэндлеры ────────────────────────────────────────────────────────────────
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
-    name = get_doctor(uid)
-    if name:
-        await update.message.reply_text(
-            f"Привет, {name.split()[0]}! 👋\n\n"
-            "Отправьте своё расписание:\n"
-            "• <b>15.09 10:00–15:00 каб20</b>\n"
-            "• <b>15 сентября с 10 до 15 кабинет 21</b>\n\n"
-            "/myname — изменить имя  |  /last — последние записи",
-            parse_mode="HTML"
-        )
-        return ConversationHandler.END
-    await update.message.reply_text(
-        "👋 Привет! Бот клиники <b>Гинекологи Рассвет</b>.\n\n"
-        "Введите ваши <b>Фамилию Имя Отчество</b> для расписания:",
-        parse_mode="HTML"
-    )
-    return ASK_NAME
-
-async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    fio = update.message.text.strip()
-    save_doctor(update.effective_user.id, update.effective_user.full_name, fio)
-    await update.message.reply_text(
-        f"✅ Записан как: <b>{fio}</b>\n\n"
-        "Теперь присылайте расписание:\n"
-        "• <b>15.09 10:00–15:00 каб20</b>",
-        parse_mode="HTML"
-    )
-    return ConversationHandler.END
-
-async def cmd_myname(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введите новое ФИО:")
-    return ASK_NAME
-
-async def cmd_last(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    doctor = get_doctor(update.effective_user.id)
-    if not doctor:
-        await update.message.reply_text("Вы не зарегистрированы. Напишите /start")
-        return
-    rows = get_last(doctor)
-    if not rows:
-        await update.message.reply_text("У вас пока нет записей.")
-        return
-    lines = ["📋 <b>Ваши последние записи:</b>"]
-    for r in rows:
-        lines.append(f"• {r[2]} {r[3]}–{r[4]} {r[5]}")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid    = update.effective_user.id
-    text   = update.message.text.strip()
-    doctor = get_doctor(uid)
-
-    if not doctor:
-        await update.message.reply_text("Сначала представьтесь — напишите /start")
-        return ConversationHandler.END
-
-    date_str, start, end, cabinet = parse_schedule(text)
-
-    if not date_str and not start:
-        await update.message.reply_text(
-            "Не смог распознать 🤔\n\n"
-            "Примеры:\n"
-            "• <b>15.09 10:00–15:00 каб20</b>\n"
-            "• <b>15 сентября с 10 до 15 кабинет 21</b>",
-            parse_mode="HTML"
-        )
-        return ConversationHandler.END
-
-    if cabinet:
-        save_schedule(doctor, date_str or "?", start or "?", end or "?", cabinet, text)
-        await update.message.reply_text(
-            f"✅ Записано!\n👤 {doctor}\n📅 {date_str}  ⏰ {start}–{end}\n🚪 {cabinet}"
-        )
-        return ConversationHandler.END
-
-    ctx.user_data["pending"] = (doctor, date_str, start, end, text)
-    await update.message.reply_text("Какой кабинет?", reply_markup=_CAB_KB)
-    return ASK_CABINET
-
-async def got_cabinet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    raw_cab = update.message.text.strip()
-    pending = ctx.user_data.pop("pending", None)
-    if not pending:
-        await update.message.reply_text("Отправьте расписание заново.", reply_markup=ReplyKeyboardRemove())
-        return ConversationHandler.END
-    doctor, date_str, start, end, raw = pending
-    m = re.search(r"\d+", raw_cab)
-    cabinet = f"Каб.{m.group()}" if m else raw_cab
-    save_schedule(doctor, date_str or "?", start or "?", end or "?", cabinet, raw)
-    await update.message.reply_text(
-        f"✅ Записано!\n👤 {doctor}\n📅 {date_str}  ⏰ {start}–{end}\n🚪 {cabinet}",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    saved = []
+    for date_str, start, end in entries:
+        if date_str or start:
+            save_schedule(doctor, date_str or "?", start or "?", end or "?", cabinet, raw)
+            saved.append(f"📅 {date_str}  ⏰ {start}–{end}")
+    lines = [f"✅ Записано {len(saved)} дн. — 🚪 {cabinet}  👤 {doctor}"] + saved
+    await update.message.reply_text("\n".join(lines), reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
