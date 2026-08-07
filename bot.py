@@ -66,41 +66,65 @@ def get_cabinet_by_name(full_name: str) -> str | None:
     surname = full_name.strip().split()[0].lower() if full_name.strip() else ""
     return DOCTOR_CABINET.get(surname)
 
+# ─── Хранение в памяти (резерв на случай недоступности Apps Script) ───────────
+_cache: dict[int, str] = {}   # user_id → ФИО
+_schedules: list = []          # все записи сессии
+
 # ─── Работа с Google Sheets через Apps Script ─────────────────────────────────
 
 def _call(action: str, **kwargs):
-    """GET-запрос к Apps Script (надёжнее POST при редиректах Google)."""
+    """GET-запрос к Apps Script."""
     if not SCRIPT_URL:
-        raise RuntimeError("SCRIPT_URL не задан")
+        return {"ok": False, "error": "no SCRIPT_URL"}
     import json as _json
     params = {"action": action, "data": _json.dumps(kwargs, ensure_ascii=False)}
     r = requests.get(SCRIPT_URL, params=params, timeout=15)
     return r.json()
 
 def get_doctor(user_id: int) -> str | None:
+    # Сначала — из памяти (быстро и надёжно)
+    if user_id in _cache:
+        return _cache[user_id]
+    # Потом — из таблицы
     try:
         res = _call("get_doctor", telegram_id=user_id)
-        return res.get("fio") if res.get("ok") else None
+        if res.get("ok") and res.get("fio"):
+            _cache[user_id] = res["fio"]
+            return res["fio"]
     except Exception as e:
         logging.error(f"get_doctor error: {e}")
-        return None
+    return None
 
 def save_doctor(user_id: int, tg_name: str, fio: str):
+    _cache[user_id] = fio  # всегда в память
     try:
         _call("save_doctor", telegram_id=user_id, tg_name=tg_name, fio=fio)
     except Exception as e:
-        logging.error(f"save_doctor error: {e}")
+        logging.error(f"save_doctor sheets error: {e}")
 
 def save_schedule(doctor, date_str, start, end, cabinet, raw):
+    # Всегда в память
+    _schedules.append({
+        "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "doctor": doctor, "date": date_str,
+        "start": start, "end": end, "cabinet": cabinet, "raw": raw
+    })
+    # И в таблицу
     try:
         _call("save_schedule",
               timestamp=datetime.now().strftime("%d.%m.%Y %H:%M"),
               doctor=doctor, date=date_str, start=start,
               end=end, cabinet=cabinet, raw=raw)
     except Exception as e:
-        logging.error(f"save_schedule error: {e}")
+        logging.error(f"save_schedule sheets error: {e}")
 
 def get_last(doctor: str):
+    # Из памяти
+    rows = [s for s in _schedules if s["doctor"] == doctor]
+    if rows:
+        return [[s["timestamp"], s["doctor"], s["date"],
+                 s["start"], s["end"], s["cabinet"]] for s in rows[-5:]]
+    # Из таблицы
     try:
         res = _call("get_last", doctor=doctor)
         return res.get("rows", []) if res.get("ok") else []
