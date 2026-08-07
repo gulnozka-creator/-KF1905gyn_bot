@@ -68,20 +68,18 @@ def get_cabinet_by_name(full_name: str) -> str | None:
 
 # ─── Работа с Google Sheets через Apps Script ─────────────────────────────────
 
-def _post(action: str, **kwargs):
+def _call(action: str, **kwargs):
+    """GET-запрос к Apps Script (надёжнее POST при редиректах Google)."""
     if not SCRIPT_URL:
         raise RuntimeError("SCRIPT_URL не задан")
-    payload = {"action": action, **kwargs}
-    s = requests.Session()
-    r = s.post(SCRIPT_URL, json=payload, timeout=15, allow_redirects=False)
-    if r.status_code in (301, 302, 303, 307, 308):
-        redirect_url = r.headers.get("Location", SCRIPT_URL)
-        r = s.post(redirect_url, json=payload, timeout=15)
+    import json as _json
+    params = {"action": action, "data": _json.dumps(kwargs, ensure_ascii=False)}
+    r = requests.get(SCRIPT_URL, params=params, timeout=15)
     return r.json()
 
 def get_doctor(user_id: int) -> str | None:
     try:
-        res = _post("get_doctor", telegram_id=user_id)
+        res = _call("get_doctor", telegram_id=user_id)
         return res.get("fio") if res.get("ok") else None
     except Exception as e:
         logging.error(f"get_doctor error: {e}")
@@ -89,13 +87,13 @@ def get_doctor(user_id: int) -> str | None:
 
 def save_doctor(user_id: int, tg_name: str, fio: str):
     try:
-        _post("save_doctor", telegram_id=user_id, tg_name=tg_name, fio=fio)
+        _call("save_doctor", telegram_id=user_id, tg_name=tg_name, fio=fio)
     except Exception as e:
         logging.error(f"save_doctor error: {e}")
 
 def save_schedule(doctor, date_str, start, end, cabinet, raw):
     try:
-        _post("save_schedule",
+        _call("save_schedule",
               timestamp=datetime.now().strftime("%d.%m.%Y %H:%M"),
               doctor=doctor, date=date_str, start=start,
               end=end, cabinet=cabinet, raw=raw)
@@ -104,7 +102,7 @@ def save_schedule(doctor, date_str, start, end, cabinet, raw):
 
 def get_last(doctor: str):
     try:
-        res = _post("get_last", doctor=doctor)
+        res = _call("get_last", doctor=doctor)
         return res.get("rows", []) if res.get("ok") else []
     except Exception:
         return []
@@ -191,14 +189,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = get_doctor(uid)
     if name:
-        cabinet = get_cabinet_by_name(name)
-        cab_info = f"Ваш кабинет: <b>{cabinet}</b>\n\n" if cabinet else ""
         await update.message.reply_text(
             f"Привет, {name.split()[0]}! 👋\n\n"
-            f"{cab_info}"
-            "Отправьте своё расписание:\n"
+            "Отправьте своё расписание — одну дату или сразу весь месяц через запятую:\n"
             "• <b>15.09 10:00–15:00</b>\n"
-            "• <b>15 сентября с 10 до 15</b>\n\n"
+            "• <b>01.09 09:00-15:00, 08.09 09:00-15:00, 15.09 10:00-15:00</b>\n\n"
             "/myname — изменить имя  |  /last — последние записи",
             parse_mode="HTML"
         )
@@ -217,14 +212,11 @@ async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     save_doctor(update.effective_user.id, update.effective_user.full_name, name)
 
-    cabinet = get_cabinet_by_name(name)
-    cab_info = f"\nВаш кабинет: <b>{cabinet}</b>" if cabinet else ""
-
     await update.message.reply_text(
-        f"✅ Записан как: <b>{name}</b>{cab_info}\n\n"
-        "Теперь присылайте расписание:\n"
+        f"✅ Записан как: <b>{name}</b>\n\n"
+        "Теперь присылайте расписание — одну дату или весь месяц через запятую:\n"
         "• <b>15.09 10:00–15:00</b>\n"
-        "• <b>15 сентября с 10 до 15</b>",
+        "• <b>01.09 09:00-15:00, 08.09 09:00-15:00, 15.09 10:00-15:00</b>",
         parse_mode="HTML"
     )
     return ConversationHandler.END
@@ -268,23 +260,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    cabinet = get_cabinet_by_name(doctor)
-
-    if not cabinet:
-        # Кабинет не определён — сохраняем первую запись и спрашиваем кабинет
-        ctx.user_data["pending_multi"] = (doctor, entries, text)
-        await update.message.reply_text("Какой кабинет?", reply_markup=_CAB_KB)
-        return ASK_CABINET
-
-    # Сохраняем все записи
+    # Сохраняем все записи (кабинет назначается позже заведующей)
     saved = []
     for date_str, start, end in entries:
         if date_str or start:
-            save_schedule(doctor, date_str or "?", start or "?", end or "?", cabinet, text)
+            save_schedule(doctor, date_str or "?", start or "?", end or "?", "—", text)
             saved.append(f"📅 {date_str}  ⏰ {start}–{end}")
 
     if saved:
-        lines = [f"✅ Записано {len(saved)} дн. — 🚪 {cabinet}  👤 {doctor}"] + saved
+        lines = [f"✅ Записано {len(saved)} дн.  👤 {doctor}"] + saved
         await update.message.reply_text("\n".join(lines))
     else:
         await update.message.reply_text("Не удалось распознать даты, попробуйте ещё раз.")
