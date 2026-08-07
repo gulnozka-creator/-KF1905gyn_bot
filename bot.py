@@ -103,18 +103,20 @@ def save_doctor(user_id: int, tg_name: str, fio: str):
         logging.error(f"save_doctor sheets error: {e}")
 
 def save_schedule(doctor, date_str, start, end, cabinet, raw):
-    # Всегда в память
-    _schedules.append({
-        "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "doctor": doctor, "date": date_str,
-        "start": start, "end": end, "cabinet": cabinet, "raw": raw
-    })
-    # И в таблицу
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+    # В памяти — перезаписываем если та же дата у того же врача
+    for s in _schedules:
+        if s["doctor"] == doctor and s["date"] == date_str:
+            s.update({"timestamp": ts, "start": start, "end": end,
+                       "cabinet": cabinet, "raw": raw})
+            break
+    else:
+        _schedules.append({"timestamp": ts, "doctor": doctor, "date": date_str,
+                            "start": start, "end": end, "cabinet": cabinet, "raw": raw})
+    # В таблицу
     try:
-        _call("save_schedule",
-              timestamp=datetime.now().strftime("%d.%m.%Y %H:%M"),
-              doctor=doctor, date=date_str, start=start,
-              end=end, cabinet=cabinet, raw=raw)
+        _call("save_schedule", timestamp=ts, doctor=doctor, date=date_str,
+              start=start, end=end, cabinet=cabinet, raw=raw)
     except Exception as e:
         logging.error(f"save_schedule sheets error: {e}")
 
@@ -218,7 +220,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Отправьте своё расписание — одну дату или сразу весь месяц через запятую:\n"
             "• <b>15.09 10:00–15:00</b>\n"
             "• <b>01.09 09:00-15:00, 08.09 09:00-15:00, 15.09 10:00-15:00</b>\n\n"
-            "/myname — изменить имя  |  /last — последние записи",
+            "/myplan — моё расписание  |  /myname — изменить имя",
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -258,9 +260,32 @@ async def cmd_last(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("У вас пока нет записей.")
         return
-    lines = ["📋 <b>Ваши последние записи:</b>"]
+    lines = ["📋 <b>Последние записи:</b>"]
     for r in rows:
-        lines.append(f"• {r[2]}  {r[3]}–{r[4]}  {r[5]}")
+        lines.append(f"• {r[2]}  {r[3]}–{r[4]}")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+async def cmd_myplan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    doctor = get_doctor(update.effective_user.id)
+    if not doctor:
+        await update.message.reply_text("Вы не зарегистрированы. Напишите /start")
+        return
+    rows = [s for s in _schedules if s["doctor"] == doctor]
+    if not rows:
+        await update.message.reply_text("У вас пока нет записей.")
+        return
+    # Сортируем по дате
+    def sort_key(s):
+        try:
+            d, m = s["date"].split(".")
+            return (int(m), int(d))
+        except Exception:
+            return (99, 99)
+    rows = sorted(rows, key=sort_key)
+    lines = [f"📅 <b>Ваше расписание — {doctor}:</b>"]
+    for s in rows:
+        lines.append(f"• {s['date']}  ⏰ {s['start']}–{s['end']}")
+    lines.append("\nЧтобы изменить дату — отправьте её заново с новым временем.")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -331,6 +356,7 @@ def main():
     )
     app.add_handler(conv)
     app.add_handler(CommandHandler("last", cmd_last))
+    app.add_handler(CommandHandler("myplan", cmd_myplan))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("Бот запущен ✅")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
