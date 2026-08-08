@@ -5,11 +5,47 @@ Telegram-бот для сбора расписания врачей — Клин
 
 import os, re, logging, requests
 from datetime import datetime
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler
 )
+
+# ─── Список врачей для выбора ─────────────────────────────────────────────────
+DOCTORS = [
+    "Елдашова Гульноза",
+    "Ланько Анастасия",
+    "Белогурова Екатерина",
+    "Малышева Яна",
+    "Райкова Анастасия",
+    "Астаповская Ольга",
+    "Семенова Милена",
+    "Голубкова Наталья",
+    "Савенко Юлия",
+    "Фомина Мария",
+    "Ахмедова Дженнет",
+    "Тарасенко Юлия",
+    "Стыкин Яков",
+    "Ростовцева Оксана",
+    "Глоба Юлия",
+    "Слепцова Дарья",
+    "Дубинин",
+    "Титов",
+    "Кондаков Илья",
+    "Орлов Олег",
+    "Локтев Артем",
+    "Бехтева",
+    "Маркарьян Даниил",
+    "Лукьянов",
+]
+
+def _make_doctors_kb():
+    """Клавиатура с именами врачей по 2 в ряд."""
+    rows = []
+    for i in range(0, len(DOCTORS), 2):
+        row = DOCTORS[i:i+2]
+        rows.append(row)
+    return ReplyKeyboardMarkup(rows, one_time_keyboard=True, resize_keyboard=True)
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
@@ -228,9 +264,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Это бот Клиники Фомина 1905 г!\n"
         "Я помогу тебе сформировать запись 📅\n\n"
-        "Введите своё <b>Имя и Фамилию</b>:\n"
-        "(например: <i>Юлия Савенко</i>)",
-        parse_mode="HTML"
+        "Выберите себя из списка:",
+        reply_markup=_make_doctors_kb()
     )
     return ASK_NAME
 
@@ -248,7 +283,10 @@ async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def cmd_myname(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введите новое Имя и Фамилию:")
+    await update.message.reply_text(
+        "Выберите себя из списка:",
+        reply_markup=_make_doctors_kb()
+    )
     return ASK_NAME
 
 async def cmd_last(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
