@@ -119,16 +119,19 @@ def save_schedule(doctor: str, date_str: str, start: str, end: str, raw: str, is
 def get_my_plan(doctor: str) -> list:
     rows = [s for s in _schedules if s["doctor"] == doctor]
     if rows:
-        return rows
+        # Дедупликация по дате — оставляем последнюю запись
+        seen: dict[str, dict] = {}
+        for s in rows:
+            seen[s["date"]] = s
+        return list(seen.values())
     res = _call("get_last", doctor=doctor)
     if res.get("ok") and res.get("rows"):
-        loaded = []
+        seen: dict[str, dict] = {}
         for r in res["rows"]:
-            loaded.append({"date": str(r[2]), "start": str(r[3]), "end": str(r[4])})
-        # Кладём в кеш чтобы повторно не запрашивать
-        for item in loaded:
-            item["doctor"] = doctor
-            _schedules.append(item)
+            date = str(r[2])
+            seen[date] = {"doctor": doctor, "date": date, "start": str(r[3]), "end": str(r[4])}
+        loaded = list(seen.values())
+        _schedules.extend(loaded)
         return loaded
     return []
 
