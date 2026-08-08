@@ -14,7 +14,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 SCRIPT_URL   = os.environ.get("SCRIPT_URL", "")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")   # ← ваш Telegram chat ID (добавить в Railway)
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "303052844")   # ← ваш Telegram chat ID (добавить в Railway)
 
 # ─── Список врачей ────────────────────────────────────────────────────────────
 DOCTORS = [
