@@ -297,18 +297,13 @@ async def notify_admin(app: Application, text: str, reply_markup=None):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # Координатор
+    # Координатор — показываем подсказку, но продолжаем как врач
     if uid == ADMIN_CHAT_ID:
         await update.message.reply_text(
-            "👩‍💼 <b>Панель координатора</b>\n\n"
-            "/open — открыть сбор расписания\n"
-            "/status — кто подал / не подал\n"
-            "/conflicts — проверить конфликты\n"
-            "/remind — разослать напоминание сейчас",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
+            "👩‍💼 <b>Команды координатора:</b>\n"
+            "/open · /status · /conflicts · /remind",
+            parse_mode="HTML"
         )
-        return ConversationHandler.END
 
     name = get_doctor(uid)
     if name:
