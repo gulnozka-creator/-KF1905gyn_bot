@@ -205,7 +205,7 @@ def get_red_yellow_days(period_key: str) -> dict:
     return {"red": [], "yellow": []}
 
 def check_conflicts(period_key: str) -> list:
-    """Возвращает список конфликтов [{'date': '05.12', 'cab': 'Каб.20', 'doctors': [...], 'times': [...]}]"""
+    """Возвращает список конфликтов"""
     res = _call("check_conflicts", period=period_key)
     return res.get("conflicts", []) if res.get("ok") else []
 
@@ -301,10 +301,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if uid == ADMIN_CHAT_ID:
         await update.message.reply_text(
             "👩‍💼 <b>Панель координатора</b>\n\n"
-            "/открыть — открыть сбор расписания\n"
-            "/статус — кто подал / не подал\n"
-            "/конфликты — проверить конфликты\n"
-            "/напомнить — разослать напоминание сейчас",
+            "/open — открыть сбор расписания\n"
+            "/status — кто подал / не подал\n"
+            "/conflicts — проверить конфликты\n"
+            "/remind — разослать напоминание сейчас",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardRemove()
         )
@@ -393,13 +393,12 @@ async def _start_flex_flow(update, ctx, doctor, period_key, period):
         )
         return ConversationHandler.END
 
-    ctx.user_data["flex_selected"]  = []   # [{date, slot}]
-    ctx.user_data["flex_pending"]   = []   # список дат для ввода времени
-    ctx.user_data["flex_entries"]   = []   # [{date, start, end}]
+    ctx.user_data["flex_selected"]  = []
+    ctx.user_data["flex_pending"]   = []
+    ctx.user_data["flex_entries"]   = []
     ctx.user_data["flex_cur_date"]  = None
     ctx.user_data["flex_cur_start"] = None
 
-    # Формируем текст
     lines = [f"📋 <b>{period.get('label', '')} — нужна помощь:</b>\n"]
     if red:
         lines.append("🔴 <b>Красные дни</b> (нет гинеколога):")
@@ -409,7 +408,6 @@ async def _start_flex_flow(update, ctx, doctor, period_key, period):
         lines.extend(f"  • {d}" for d in yellow)
     lines.append("\nВыбери дни, когда можешь выйти:")
 
-    # Кнопки: дата + утро / дата + вечер
     all_days = red + yellow
     buttons  = []
     for d in all_days:
@@ -437,7 +435,6 @@ async def flex_date_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.answer("Выберите хотя бы один день!", show_alert=True)
             return FLEX_CHOOSING_DATES
 
-        # Начинаем собирать время
         ctx.user_data["flex_pending"] = list(selected)
         ctx.user_data["flex_entries"] = []
         return await _ask_next_start(update, ctx)
@@ -447,7 +444,6 @@ async def flex_date_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         selected = ctx.user_data.setdefault("flex_selected", [])
 
         item = {"date": d, "slot": slot}
-        # Toggle
         existing = next((x for x in selected if x["date"] == d and x["slot"] == slot), None)
         if existing:
             selected.remove(existing)
@@ -570,24 +566,21 @@ async def flex_confirm_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         period_key = ctx.user_data.get("period_key", get_open_period())
         entries    = ctx.user_data.get("flex_entries", [])
 
-        # Сохраняем в Sheets
         for e in entries:
             save_schedule(doctor, e["date"], e["start"], e["end"],
                           f"{e['date']} {e['start']}-{e['end']}", period_key)
 
         await query.message.reply_text(
-            "✅ Расписание отправлено координатору. После проверки ты получишь уведомление.",
+            "✅ Расписание сохранено!",
             reply_markup=MAIN_KB
         )
 
-        # Уведомляем координатора
         period = PERIODS.get(period_key, {})
         lines  = [f"📋 <b>{doctor}</b> подала(л) расписание ({period.get('label', '')}):\n"]
         for e in entries:
             lines.append(f"• {e['date']} — {e['start']}–{e['end']}")
         await notify_admin(ctx.application, "\n".join(lines))
 
-        # Пересчитываем и уведомляем остальных флекс-врачей
         ctx.application.create_task(
             _notify_remaining_flex(ctx.application, period_key, skip_doctor=doctor)
         )
@@ -596,16 +589,15 @@ async def flex_confirm_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return FLEX_CONFIRM
 
 async def _notify_remaining_flex(app: Application, period_key: str, skip_doctor: str):
-    """После подачи одного флекс-врача шлём обновлённый список остальным."""
     import asyncio
-    await asyncio.sleep(2)  # небольшая задержка чтобы Sheets успел обновиться
+    await asyncio.sleep(2)
 
     ryd    = get_red_yellow_days(period_key)
     red    = ryd.get("red", [])
     yellow = ryd.get("yellow", [])
 
     if not red and not yellow:
-        return  # все закрыто — не беспокоим
+        return
 
     period    = PERIODS.get(period_key, {})
     submitted = get_submitted_flex(period_key)
@@ -676,7 +668,6 @@ async def receive_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines  = [f"✅ Записано {len(saved)} дн.  👤 {doctor}  📅 {period.get('label', '')}"] + saved
     await update.message.reply_text("\n".join(lines), reply_markup=MAIN_KB)
 
-    # Уведомление координатору
     action = "✏️ Исправил(а)" if is_fix else "➕ Добавил(а)"
     admin_lines = [f"🔔 <b>{doctor}</b> {action} расписание ({period.get('label', '')}):"] + saved
     await notify_admin(ctx.application, "\n".join(admin_lines))
@@ -766,7 +757,7 @@ async def btn_change(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return CHOOSING_NAME
 
-# ─── АДМИН: /открыть ─────────────────────────────────────────────────────────
+# ─── АДМИН: /open ────────────────────────────────────────────────────────────
 
 async def cmd_open(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -796,7 +787,6 @@ async def open_period_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     mark_period_open(period_key)
 
-    # Рассылка всем зарегистрированным врачам
     all_reg = get_all_registered()
     count   = 0
     for row in all_reg:
@@ -806,7 +796,7 @@ async def open_period_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if fio not in ALL_DOCTORS_SET:
                 continue
             if fio in FLEX_SET:
-                continue  # флекс-врачи получат позже (после 10-го)
+                continue
 
             icon = "🎄" if period_key == "jan2027h" else "📅"
             text = (
@@ -826,7 +816,7 @@ async def open_period_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-# ─── АДМИН: /статус ──────────────────────────────────────────────────────────
+# ─── АДМИН: /status ──────────────────────────────────────────────────────────
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -853,7 +843,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
-# ─── АДМИН: /конфликты ───────────────────────────────────────────────────────
+# ─── АДМИН: /conflicts ───────────────────────────────────────────────────────
 
 async def cmd_conflicts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -868,7 +858,6 @@ async def cmd_conflicts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     conflicts = check_conflicts(period_key)
 
     if not conflicts:
-        # Нет конфликтов — предлагаем отправить флекс-врачам
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📨 Отправить флекс-врачам", callback_data=f"send_flex:{period_key}")
         ]])
@@ -934,7 +923,6 @@ async def conflicts_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _send_flex_broadcast(ctx.application, period_key, query.message)
 
 async def _send_flex_broadcast(app: Application, period_key: str, admin_msg=None):
-    """Рассылаем флекс-врачам список красных/жёлтых дней."""
     ryd    = get_red_yellow_days(period_key)
     red    = ryd.get("red", [])
     yellow = ryd.get("yellow", [])
@@ -975,7 +963,7 @@ async def _send_flex_broadcast(app: Application, period_key: str, admin_msg=None
             parse_mode="HTML"
         )
 
-# ─── АДМИН: /напомнить ───────────────────────────────────────────────────────
+# ─── АДМИН: /remind ──────────────────────────────────────────────────────────
 
 async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -983,7 +971,7 @@ async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     period_key = get_open_period()
     if not period_key:
-        await update.message.reply_text("Нет открытого периода — сначала откройте сбор (/открыть).")
+        await update.message.reply_text("Нет открытого периода.")
         return
 
     period    = PERIODS.get(period_key, {})
@@ -1076,10 +1064,10 @@ def main():
     app.add_handler(conv)
 
     # Команды координатора (вне ConversationHandler)
-    app.add_handler(CommandHandler("открыть",   cmd_open))
-    app.add_handler(CommandHandler("статус",    cmd_status))
-    app.add_handler(CommandHandler("конфликты", cmd_conflicts))
-    app.add_handler(CommandHandler("напомнить", cmd_remind))
+    app.add_handler(CommandHandler("open",      cmd_open))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("conflicts", cmd_conflicts))
+    app.add_handler(CommandHandler("remind",    cmd_remind))
 
     # Callback-кнопки координатора
     app.add_handler(CallbackQueryHandler(open_period_callback,  pattern=r"^open:"))
